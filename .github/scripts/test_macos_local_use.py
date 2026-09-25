@@ -1,4 +1,4 @@
-"""Test an explicit, hash-gated LOCAL-USE override, NOT notarization acceptance."""
+"""Test a hash-gated LOCAL-USE override, NOT notarization acceptance."""
 from pathlib import Path
 import hashlib
 import json
@@ -21,7 +21,8 @@ report = {'status': 'not_run', 'scope': 'Explicit per-app local-use override; NO
 tracked = set()
 
 def run(args, check=True, timeout=90):
-    result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run([str(a) for a in args], capture_output=True, text=True,
+                            encoding='utf-8', errors='backslashreplace', timeout=timeout)
     if check and result.returncode:
         raise RuntimeError(f'{args[0]} failed ({result.returncode}): {result.stdout[-3000:]} {result.stderr[-3000:]}')
     return result
@@ -83,21 +84,18 @@ try:
     info = contents / 'Info.plist'
     info_bytes = info.read_bytes()
     prefix = ['/bin/bash', SCRIPT, '--app', app, '--archive', ARCHIVE]
-    # A malformed ZIP must fail without clearing the app's flag.
     bad_zip = ROOT / 'corrupt.zip'
     bad_zip.write_bytes(b'not the published archive')
     result = run(['/bin/bash', SCRIPT, '--allow-local-use', '--app', app, '--archive', bad_zip], check=False)
     require(result.returncode != 0, 'Corrupt archive was accepted')
     require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Failed check changed quarantine')
     report['reject_wrong_archive_without_changes'] = True
-    # Actual program modifications must also fail closed.
     info.write_bytes(info_bytes + b'changed')
     result = run(prefix + ['--allow-local-use'], check=False)
     require(result.returncode != 0, 'Modified application was accepted')
     require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Failed content check changed quarantine')
     info.write_bytes(info_bytes)
     report['reject_modified_program_without_changes'] = True
-    # No links or hard links are permitted within managed program entries.
     native = contents / 'MacOS/oxideterm-native'
     hardlink = ROOT / 'program-hardlink'
     os.link(native, hardlink)
@@ -109,7 +107,6 @@ try:
     (OUT / 'read-only-check.txt').write_text(result.stdout + result.stderr)
     require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Read-only check changed quarantine')
     report['read_only_check_preserves_quarantine'] = True
-    # Show the distinction previously missed by the startup-only test.
     signed = run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '--verbose=2', app], check=False)
     assessed = run(['/usr/sbin/spctl', '--assess', '--type', 'execute', '--verbose=2', app], check=False)
     report['whole_bundle_codesign_exit'] = signed.returncode
@@ -118,7 +115,6 @@ try:
     report['gatekeeper_assessment_message'] = assessed.stderr.strip()
     require(assessed.returncode != 0, 'Unexpected Gatekeeper acceptance; inspect runner policy')
     report['gatekeeper_accepted'] = False
-    # Only an explicit opt-in changes metadata, after all file checks pass.
     result = run(prefix + ['--allow-local-use'])
     (OUT / 'local-use-override.txt').write_text(result.stdout + result.stderr)
     require('com.apple.quarantine' not in list_xattrs(app), 'App root remains quarantined')
@@ -140,7 +136,6 @@ try:
     report['outside_link_quarantine_unchanged'] = True
     report['global_policy_unchanged'] = True
     report['repeated_override_idempotent'] = True
-    # Check that Launch Services can start this locally-authorized copy.
     run(['/usr/bin/open', '-n', app])
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
