@@ -65,7 +65,7 @@ for ENTRY in "${ENTRIES[@]}"; do
     [ -e "$DEST" ] && [ ! -L "$DEST" ] || fail "程序条目缺失或是链接：$ENTRY"
     /usr/bin/find "$DEST" \( -type l -o \( ! -type d ! -type f \) -o \( -type f -links +1 \) \) -print > "$WORK/unsafe"
     [ ! -s "$WORK/unsafe" ] || fail "程序条目含链接或特殊文件：$ENTRY"
-    /usr/bin/diff -qr -x .DS_Store "$REF/$ENTRY" "$DEST" > "$WORK/diff" || fail "程序内容与已发布版本不同：$ENTRY。拒绝放行，不覆盖文件。"
+    /usr/bin/diff -qr -x .DS_Store "$REF/$ENTRY" "$DEST" > "$WORK/diff" || fail "程序内容与已发布版本不同：${ENTRY}。拒绝放行，不覆盖文件。"
 done
 # Validate each embedded Mach-O signature outside the mutable app hierarchy.
 COUNT=0
