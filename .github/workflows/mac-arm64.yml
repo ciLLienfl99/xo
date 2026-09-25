@@ -1,0 +1,91 @@
+name: Build Mac ARM64 Bundle
+run-name: Mac ARM64 bundle · ${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-arm64-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and verify Apple Silicon app
+    runs-on: macos-14
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      LIBGSSAPI_IMPL: apple
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - name: Checkout build configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact uploaded source version
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: AnalyseDeCircuit/oxideterm
+          ref: 4d5933c9914ab5c5efc4ff4124bdf255f6ba619d
+          path: source
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Verify and apply custom changes
+        run: python build/prepare.py
+      - name: Validate build machine
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --find metal
+          xcrun --sdk macosx --find metallib
+          df -h .
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.94.1
+          targets: aarch64-apple-darwin
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: source -> target
+          key: custom-macos14-arm64
+          cache-on-failure: true
+      - name: Run packaging regression tests
+        working-directory: source
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Check all locale catalogs
+        working-directory: source
+        run: python scripts/quality/audit_i18n.py
+      - name: Test native portable runtime and updater
+        working-directory: source
+        run: cargo test --locked --release --target aarch64-apple-darwin -p oxideterm-portable-runtime -p oxideterm-update --lib
+      - name: Build native application and packages
+        working-directory: source
+        run: python scripts/release/package_native.py aarch64-apple-darwin
+      - name: Verify native packages
+        working-directory: source
+        run: python scripts/release/verify_native_package.py --target aarch64-apple-darwin --version 2.0.31 --dist dist
+      - name: Prepare single-app download
+        run: python build/collect.py
+      - name: Upload Mac ARM64 application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Mac-ARM64-Bundle
+          path: output/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload exact corresponding source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Corresponding-Source
+          path: build-source/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
