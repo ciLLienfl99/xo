@@ -53,3 +53,48 @@ jobs:
           BUILD_SHA: ${{ steps.verify.outputs.sha }}
           APP_VERSION: ${{ steps.verify.outputs.version }}
         run: python3 .github/scripts/publish_arm64_release.py
+      - name: Verify anonymous public application download
+        env:
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.verify.outputs.tag }}
+          APP_VERSION: ${{ steps.verify.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, tempfile, time, zipfile
+          from pathlib import Path
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+          name = 'OxideTerm-' + os.environ['APP_VERSION'] + '-Mac-ARM64-Bundle.zip'
+          expected_file = Path('release-files') / name
+          expected = hashlib.sha256(expected_file.read_bytes()).hexdigest()
+          url = 'https://github.com/' + os.environ['RELEASE_REPO'] + '/releases/download/' + os.environ['RELEASE_TAG'] + '/' + name
+          # No Authorization header: exercise the same public URL the user receives.
+          with tempfile.TemporaryDirectory(prefix='public-download-') as temporary:
+              destination = Path(temporary) / name
+              for attempt in range(3):
+                  try:
+                      request = Request(url, headers={'User-Agent': 'oxideterm-public-download-check'})
+                      with urlopen(request, timeout=180) as response, destination.open('wb') as output:
+                          if response.status != 200:
+                              raise RuntimeError('Unexpected public download status')
+                          while chunk := response.read(1024 * 1024):
+                              output.write(chunk)
+                      break
+                  except (HTTPError, URLError):
+                      if attempt == 2:
+                          raise
+                      time.sleep(2)
+              actual = hashlib.sha256(destination.read_bytes()).hexdigest()
+              if actual != expected or destination.stat().st_size != expected_file.stat().st_size:
+                  raise RuntimeError('Public download differs from verified Actions output')
+              with zipfile.ZipFile(destination) as archive:
+                  if archive.testzip() is not None or {path.split('/')[0] for path in archive.namelist()} != {'OxideTerm.app'}:
+                      raise RuntimeError('Public application ZIP is damaged or has an unexpected layout')
+              print('Anonymous public download: HTTP 200; ZIP integrity passed')
+              print('Application bytes: ' + str(destination.stat().st_size))
+              print('SHA256: ' + actual)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('\n公开下载验证：无需登录，HTTP 200；应用 ZIP 完整性、字节数和 SHA256 均通过。\n')
+          PY
