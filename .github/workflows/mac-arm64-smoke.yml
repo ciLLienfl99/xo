@@ -1,0 +1,118 @@
+name: Check Mac ARM64 Startup
+
+on:
+  workflow_run:
+    workflows: [Build Mac ARM64 Bundle]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mac-arm64-smoke-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+jobs:
+  startup:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Download the verified application
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: OxideTerm-Mac-ARM64-Bundle
+          path: artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Verify checksum and launch a disposable app copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+          import time
+
+          root = Path.cwd()
+          output = root / 'smoke-output'
+          output.mkdir(exist_ok=True)
+          report = {
+              'scope': 'Initial application startup only; not SSH/SFTP, password-unlock or Gatekeeper validation',
+              'startup': 'not_run',
+          }
+          tracked = set()
+          try:
+              archive = root / 'artifact/OxideTerm-2.0.31-Mac-ARM64-Bundle.zip'
+              expected, name = (root / 'artifact/SHA256.txt').read_text().strip().split(maxsplit=1)
+              if name != archive.name:
+                  raise RuntimeError('Unexpected application filename in checksum file')
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              if digest != expected:
+                  raise RuntimeError('Application checksum mismatch')
+              report['application_sha256'] = digest
+              stage = root / 'startup-copy'
+              stage.mkdir()
+              subprocess.run(['ditto', '-x', '-k', str(archive), str(stage)], check=True)
+              app = stage / 'OxideTerm.app'
+              executable = str(app / 'Contents/MacOS/oxideterm-native')
+              data = app / 'Contents/UserData'
+              if data.exists():
+                  raise RuntimeError('The downloaded app already contains user data')
+
+              def application_pids():
+                  listing = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+                  found = set()
+                  for line in listing.splitlines():
+                      fields = line.strip().split(None, 1)
+                      if len(fields) == 2 and fields[1].startswith(executable):
+                          found.add(int(fields[0]))
+                  return found
+
+              subprocess.run(['open', '-n', str(app)], check=True)
+              deadline = time.monotonic() + 15
+              while time.monotonic() < deadline:
+                  tracked = application_pids()
+                  if tracked:
+                      break
+                  time.sleep(1)
+              if not tracked:
+                  raise RuntimeError('Launch Services did not start the packaged executable')
+              time.sleep(20)
+              alive = application_pids()
+              if not (tracked & alive):
+                  raise RuntimeError('The application exited during the startup observation')
+              if not data.is_dir() or data.is_symlink():
+                  raise RuntimeError('The application did not create a real package-internal UserData directory')
+              capture = subprocess.run(['screencapture', '-x', str(output / 'startup.png')], capture_output=True, text=True)
+              report['screenshot_captured'] = capture.returncode == 0
+              report['startup'] = 'passed'
+              report['data_directory'] = 'OxideTerm.app/Contents/UserData'
+              report['observation_seconds'] = 20
+              print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+          except Exception as error:
+              report['startup'] = 'failed'
+              report['error'] = str(error)
+              raise
+          finally:
+              (output / 'startup-check.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+              for pid in tracked:
+                  try:
+                      os.kill(pid, signal.SIGTERM)
+                  except ProcessLookupError:
+                      pass
+          PY
+      - name: Upload startup-check results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-ARM64-Startup-Check
+          path: smoke-output/*
+          if-no-files-found: warn
+          retention-days: 14
