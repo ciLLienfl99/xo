@@ -8,16 +8,26 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "source/scripts/release"))
+from install_macos_bundle import verify_macho_signature
+from verify_native_package import verify_portable_archive
+
+MACHO_MAGICS = {
+    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+}
 
 
 def main() -> None:
     source_archive = ROOT / "source/dist/OxideTerm_2.0.31_macos_arm64_portable.tar.gz"
     if not source_archive.is_file():
         raise FileNotFoundError(source_archive)
+    verify_portable_archive(source_archive, "aarch64-apple-darwin", "2.0.31")
     output = ROOT / "output"
     output.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="oxideterm-verify-") as temporary:
@@ -37,16 +47,30 @@ def main() -> None:
             "managedEntries": ["Info.plist", "MacOS", "Resources", "portable-update.json"],
         }:
             raise RuntimeError("Unexpected portable layout or update replacement scope")
-        if (contents / "UserData").exists():
-            raise RuntimeError("A release must never ship user data")
-        for name in ("oxideterm-native", "oxideterm-update-helper"):
-            binary = contents / "MacOS" / name
+        if (contents / "UserData").exists() or (contents / "_CodeSignature").exists():
+            raise RuntimeError("A portable release must not ship user data or an outer resource seal")
+        required = {contents / "MacOS" / name for name in ("oxideterm-native", "oxideterm-update-helper")}
+        verified = set()
+        for binary in sorted(contents.rglob("*")):
+            if binary.is_symlink():
+                raise RuntimeError(f"Unexpected symlink: {binary.relative_to(contents)}")
+            if not binary.is_file():
+                continue
+            with binary.open("rb") as stream:
+                magic = stream.read(4)
+            if magic not in MACHO_MAGICS:
+                continue
             architecture = subprocess.check_output(["lipo", "-archs", str(binary)], text=True).strip()
             if architecture != "arm64":
-                raise RuntimeError(f"Unexpected architecture for {name}: {architecture}")
-            if not os.access(binary, os.X_OK):
-                raise RuntimeError(f"Not executable: {name}")
-            subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+                raise RuntimeError(f"Unexpected architecture for {binary.name}: {architecture}")
+            if binary in required and not os.access(binary, os.X_OK):
+                raise RuntimeError(f"Not executable: {binary.name}")
+            # Verify the exact embedded Mach-O signature on a standalone copy;
+            # codesign would otherwise promote the main file to the outer app.
+            verify_macho_signature(binary)
+            verified.add(binary)
+        if not required.issubset(verified):
+            raise RuntimeError("Required executable is missing or is not signed Mach-O code")
         destination = output / "OxideTerm-2.0.31-Mac-ARM64-Bundle.zip"
         subprocess.run([
             "ditto", "-c", "-k", "--keepParent", app.name, str(destination)
@@ -55,7 +79,7 @@ def main() -> None:
     with destination.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     (output / "SHA256.txt").write_text(f"{digest}  {destination.name}\n", encoding="utf-8")
-    print(f"Verified ARM64 application: {destination.name}; SHA256: {digest}", flush=True)
+    print(f"Verified {len(verified)} ARM64 Mach-O files; application: {destination.name}; SHA256: {digest}", flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as file:

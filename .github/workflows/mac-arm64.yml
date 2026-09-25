@@ -63,9 +63,13 @@ jobs:
           workspaces: source -> target
           key: custom-macos14-arm64
           cache-on-failure: true
-      - name: Run packaging regression tests
+          cache-workspace-crates: true
+      - name: Run packaging and real macOS signing regressions
         working-directory: source
-        run: python -m unittest discover -s scripts/tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s scripts/tests -v 2>&1 | tee "$RUNNER_TEMP/packaging-tests.log"
       - name: Check all locale catalogs
         working-directory: source
         run: python scripts/quality/audit_i18n.py
@@ -73,11 +77,18 @@ jobs:
         working-directory: source
         run: cargo test --locked --release --target aarch64-apple-darwin -p oxideterm-portable-runtime -p oxideterm-update --lib
       - name: Build native application and packages
+        id: package
         working-directory: source
-        run: python scripts/release/package_native.py aarch64-apple-darwin
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/release/package_native.py aarch64-apple-darwin 2>&1 | tee "$RUNNER_TEMP/native-package.log"
       - name: Verify native packages
         working-directory: source
-        run: python scripts/release/verify_native_package.py --target aarch64-apple-darwin --version 2.0.31 --dist dist
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/release/verify_native_package.py --target aarch64-apple-darwin --version 2.0.31 --dist dist 2>&1 | tee "$RUNNER_TEMP/package-verification.log"
       - name: Prepare single-app download
         run: python build/collect.py
       - name: Upload Mac ARM64 application
@@ -95,3 +106,22 @@ jobs:
           path: build-source/*.tar.gz
           if-no-files-found: warn
           retention-days: 30
+      - name: Retain unverified package for diagnosis on failure
+        if: failure() && steps.package.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Unverified-Packaging-Checkpoint
+          path: source/dist/*_portable.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain bounded diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Packaging-Diagnostics
+          path: |
+            ${{ runner.temp }}/packaging-tests.log
+            ${{ runner.temp }}/native-package.log
+            ${{ runner.temp }}/package-verification.log
+          if-no-files-found: warn
+          retention-days: 7

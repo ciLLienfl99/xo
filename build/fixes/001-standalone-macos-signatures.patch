@@ -1,0 +1,298 @@
+diff --git a/scripts/release/package_native.py b/scripts/release/package_native.py
+--- a/scripts/release/package_native.py
++++ b/scripts/release/package_native.py
+@@ -12,6 +12,7 @@
+ import subprocess
+ import sys
+ import tarfile
++import tempfile
+ import time
+ import zipfile
+ from dataclasses import dataclass
+@@ -854,9 +855,27 @@
+ 
+ def sign_macos_portable_tree(package_root: Path) -> None:
+     """Sign each executable without sealing mutable portable storage in a bundle."""
+-    for candidate in sorted(package_root.rglob("*")):
+-        if is_macos_binary(candidate):
+-            sign_macos_path(candidate)
++    # codesign promotes the main executable inside Contents/MacOS to its
++    # enclosing app when Info.plist is present, even if given the file path.
++    # Sign byte-identical standalone copies OUTSIDE that hierarchy, then copy
++    # the embedded Mach-O signatures back. Never seal the writable .app.
++    seal = package_root / "Contents" / "_CodeSignature"
++    if seal.exists():
++        raise RuntimeError(f"portable staging already has an outer resource seal: {seal}")
++    codesign = require_tool("codesign")
++    with tempfile.TemporaryDirectory(prefix="oxideterm-macho-sign-") as temporary:
++        for candidate in sorted(package_root.rglob("*")):
++            if is_macos_binary(candidate):
++                standalone = Path(temporary) / candidate.name
++                shutil.copy2(candidate, standalone)
++                command = macos_codesign_command(codesign, standalone)
++                command.remove("--deep")  # Individual Mach-O files, not bundles.
++                run(command)
++                run([codesign, "--verify", "--strict", "--verbose", str(standalone)])
++                shutil.copy2(standalone, candidate)
++                standalone.unlink()
++    if seal.exists():
++        raise RuntimeError(f"portable signing unexpectedly sealed the outer app: {seal}")
+ 
+ 
+ def notarize_macos_portable_tree(package_root: Path) -> None:
+diff --git a/scripts/release/install_macos_bundle.py b/scripts/release/install_macos_bundle.py
+--- a/scripts/release/install_macos_bundle.py
++++ b/scripts/release/install_macos_bundle.py
+@@ -22,6 +22,7 @@
+ import struct
+ import subprocess
+ import sys
++import tempfile
+ from typing import Iterator
+ import uuid
+ 
+@@ -130,6 +131,24 @@
+             or not isinstance(info.get("CFBundleIdentifier"), str)):
+         raise InstallError("Invalid app identity in Info.plist")
+     return info
++
++
++def verify_macho_signature(path: Path) -> None:
++    """Verify the embedded signature, not an enclosing mutable app's resources.
++
++    codesign resolves an app's main-executable path back to its bundle. A
++    private standalone copy avoids that promotion without --ignore-resources
++    or changing the original file. This verifies integrity, not notarization
++    or the publisher's identity (portable development builds are ad-hoc).
++    """
++    require_real(path, directory=False)
++    with tempfile.TemporaryDirectory(prefix="oxideterm-macho-verify-") as temporary:
++        standalone = Path(temporary) / path.name
++        shutil.copyfile(path, standalone)
++        subprocess.run(
++            ["/usr/bin/codesign", "--verify", "--strict", str(standalone)],
++            check=True,
++        )
+ 
+ 
+ def preflight(source_app: Path, target_app: Path) -> tuple[Path, Path]:
+@@ -153,7 +172,7 @@
+                     if magic in (b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
+                                  b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+                                  b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"):
+-                        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(path)], check=True)
++                        verify_macho_signature(path)
+     return source, target
+ 
+ 
+diff --git a/scripts/release/verify_native_package.py b/scripts/release/verify_native_package.py
+--- a/scripts/release/verify_native_package.py
++++ b/scripts/release/verify_native_package.py
+@@ -146,8 +146,12 @@
+     if any(name not in (root, root + "/Contents") and not name.startswith(prefix) for name in names):
+         raise RuntimeError("portable files must stay inside the app Contents directory")
+     relative = {name[len(prefix):] for name in names if name.startswith(prefix)}
+-    if any(name.split("/")[0].lower() in ("userdata", "data", "portable", "portable.json", "_codesignature") for name in relative):
+-        raise RuntimeError("portable release must not contain user data, markers or an outer bundle signature")
++    forbidden = sorted({name.split("/")[0] for name in relative
++                        if name.split("/")[0].lower() in
++                        ("userdata", "data", "portable", "portable.json", "_codesignature")})
++    if forbidden:
++        raise RuntimeError("portable release must not contain user data, markers or an outer bundle signature: "
++                           + ", ".join(forbidden))
+     required = {"Info.plist", "MacOS/oxideterm-native", "MacOS/oxideterm-update-helper",
+                 "Resources/install_macos_bundle.py", "portable-update.json"}
+     required.update("Resources/licenses/" + document for document in REQUIRED_DOCUMENTS)
+diff --git a/scripts/tests/test_macos_standalone_signing.py b/scripts/tests/test_macos_standalone_signing.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/tests/test_macos_standalone_signing.py
+@@ -0,0 +1,188 @@
++"""Regression coverage for codesign's main-executable-to-bundle promotion."""
++from pathlib import Path
++import os
++import platform
++import plistlib
++import shutil
++import subprocess
++import sys
++import tarfile
++import tempfile
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "release"))
++import install_macos_bundle as installer
++import package_native
++import verify_native_package
++
++
++class SigningFixture(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.app = self.root / "Portable.app"
++        self.binary = self.app / "Contents/MacOS/oxideterm-native"
++        self.binary.parent.mkdir(parents=True)
++        self.binary.write_bytes(b"unsigned-test-payload")
++        self.binary.chmod(0o755)
++        (self.app / "Contents/Resources").mkdir()
++        (self.app / "Contents/Info.plist").write_bytes(plistlib.dumps({
++            "CFBundleExecutable": self.binary.name,
++            "CFBundlePackageType": "APPL",
++            "CFBundleIdentifier": "com.oxideterm.signing-test",
++        }))
++
++
++class StandaloneSigningTests(SigningFixture):
++    def test_signing_never_targets_a_file_inside_the_app(self):
++        calls = []
++        def codesign(command):
++            target = Path(command[-1])
++            calls.append(command)
++            self.assertNotIn(self.app, target.parents)
++            self.assertEqual(target.read_bytes(), b"unsigned-test-payload" if "--sign" in command else b"signed-test-payload")
++            if "--sign" in command:
++                self.assertNotIn("--deep", command)
++                target.write_bytes(b"signed-test-payload")
++            else:
++                self.assertIn("--verify", command)
++                self.assertIn("--strict", command)
++        with patch.object(package_native, "is_macos_binary", side_effect=lambda p: p == self.binary), \
++             patch.object(package_native, "require_tool", return_value="/usr/bin/codesign"), \
++             patch.object(package_native, "run", side_effect=codesign):
++            package_native.sign_macos_portable_tree(self.app)
++        self.assertEqual(len(calls), 2)
++        self.assertEqual(self.binary.read_bytes(), b"signed-test-payload")
++        self.assertEqual(self.binary.stat().st_mode & 0o777, 0o755)
++        self.assertFalse(Path(calls[0][-1]).exists())
++        self.assertFalse((self.app / "Contents/_CodeSignature").exists())
++
++    def test_signing_failure_does_not_replace_original_payload(self):
++        def fail(command):
++            if "--sign" in command:
++                Path(command[-1]).write_bytes(b"invalid-signature")
++            else:
++                raise subprocess.CalledProcessError(1, command)
++        with patch.object(package_native, "is_macos_binary", side_effect=lambda p: p == self.binary), \
++             patch.object(package_native, "require_tool", return_value="/usr/bin/codesign"), \
++             patch.object(package_native, "run", side_effect=fail):
++            with self.assertRaises(subprocess.CalledProcessError):
++                package_native.sign_macos_portable_tree(self.app)
++        self.assertEqual(self.binary.read_bytes(), b"unsigned-test-payload")
++
++    def test_existing_outer_seal_is_rejected_not_silently_deleted(self):
++        seal = self.app / "Contents/_CodeSignature"
++        seal.mkdir()
++        (seal / "CodeResources").write_bytes(b"existing-seal")
++        with self.assertRaisesRegex(RuntimeError, "outer resource seal"):
++            package_native.sign_macos_portable_tree(self.app)
++        self.assertEqual((seal / "CodeResources").read_bytes(), b"existing-seal")
++
++    def test_verification_is_strict_and_does_not_modify_original(self):
++        before = installer.fingerprint(self.app)
++        targets = []
++        def verify(command, **kwargs):
++            target = Path(command[-1])
++            targets.append(target)
++            self.assertNotIn(self.app, target.parents)
++            self.assertEqual(target.read_bytes(), self.binary.read_bytes())
++            self.assertEqual(command[:-1], ["/usr/bin/codesign", "--verify", "--strict"])
++            self.assertTrue(kwargs["check"])
++        with patch.object(installer.subprocess, "run", side_effect=verify):
++            installer.verify_macho_signature(self.binary)
++        self.assertEqual(installer.fingerprint(self.app), before)
++        self.assertFalse(targets[0].exists())
++
++    def test_bad_signature_is_not_swallowed(self):
++        with patch.object(installer.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["codesign"])):
++            with self.assertRaises(subprocess.CalledProcessError):
++                installer.verify_macho_signature(self.binary)
++
++    def test_signature_verification_rejects_symlinks(self):
++        link = self.root / "linked-binary"
++        link.symlink_to(self.binary)
++        with self.assertRaisesRegex(installer.InstallError, "no links"):
++            installer.verify_macho_signature(link)
++
++
++@unittest.skipUnless(sys.platform == "darwin", "Requires Apple's real clang and codesign")
++class NativeMacSigningTests(SigningFixture):
++    def setUp(self):
++        super().setUp()
++        self.target = "aarch64-apple-darwin" if platform.machine() == "arm64" else "x86_64-apple-darwin"
++        self.fixture = self.root / "fixture-native"
++        source = self.root / "fixture.c"
++        source.write_text("int main(void) { return 0; }\n")
++        subprocess.run(["xcrun", "clang", str(source), "-o", str(self.fixture)], check=True)
++        self.identity = patch.dict(os.environ, {"MACOS_CODESIGN_IDENTITY": "-"})
++        self.identity.start()
++        self.addCleanup(self.identity.stop)
++
++    def make_archive(self):
++        dist = self.root / "dist"
++        dist.mkdir()
++        def resources(destination, target):
++            nested = destination / "helpers"
++            nested.mkdir()
++            shutil.copy2(self.fixture, nested / "nested-helper")
++        with patch.object(package_native, "DIST_DIR", dist), \
++             patch.object(package_native, "copy_runtime_resources", side_effect=resources):
++            package_native.create_portable_package(self.fixture, self.fixture, self.target,
++                                                   "2.0.31", package_native.target_label(self.target))
++        archive = next(dist.glob("*_portable.tar.gz"))
++        verify_native_package.verify_portable_archive(archive, self.target, "2.0.31")
++        stage = self.root / "unpacked"
++        stage.mkdir()
++        with tarfile.open(archive, "r:gz") as file:
++            file.extractall(stage, filter="data")
++        return stage / "OxideTerm.app"
++
++    def test_real_portable_archive_is_unsealed_but_all_macho_files_are_signed(self):
++        app = self.make_archive()
++        contents = app / "Contents"
++        self.assertFalse((contents / "_CodeSignature").exists())
++        self.assertFalse((contents / "UserData").exists())
++        binaries = [contents / installer.APP_EXECUTABLE, contents / installer.UPDATE_HELPER,
++                    contents / "Resources/helpers/nested-helper"]
++        for binary in binaries:
++            installer.verify_macho_signature(binary)
++            subprocess.run([str(binary)], check=True)
++        # Writing portable data or resources must not invalidate embedded code.
++        (contents / "UserData").mkdir()
++        (contents / "UserData/settings.json").write_text('{"fontSize": 18}')
++        (contents / "Resources/new-resource").write_text("mutable-resource")
++        for binary in binaries:
++            installer.verify_macho_signature(binary)
++        self.assertFalse((contents / "_CodeSignature").exists())
++
++    def test_real_tampered_executable_is_rejected(self):
++        app = self.make_archive()
++        binary = app / "Contents" / installer.APP_EXECUTABLE
++        data = bytearray(binary.read_bytes())
++        self.assertGreater(len(data), 4096)
++        data[4096] ^= 1
++        binary.write_bytes(data)
++        with self.assertRaises(subprocess.CalledProcessError):
++            installer.verify_macho_signature(binary)
++
++    def test_real_signed_update_and_rollback_preserve_userdata(self):
++        source = self.make_archive()
++        target = self.root / "Installed.app"
++        shutil.copytree(source, target)
++        data = target / "Contents/UserData"
++        data.mkdir()
++        (data / "profile.json").write_bytes(b"test-user-data-must-not-change")
++        expected = (data / "profile.json").read_bytes()
++        installer.install(source, target)
++        self.assertEqual((data / "profile.json").read_bytes(), expected)
++        installer.verify_macho_signature(target / "Contents" / installer.APP_EXECUTABLE)
++        installer.rollback(target)
++        self.assertEqual((data / "profile.json").read_bytes(), expected)
++        installer.verify_macho_signature(target / "Contents" / installer.APP_EXECUTABLE)
++        self.assertFalse((target / "Contents/_CodeSignature").exists())
++
++
++if __name__ == "__main__":
++    unittest.main()
