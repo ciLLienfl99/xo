@@ -1,0 +1,33 @@
+name: Inspect ARM64 packaging failure
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/inspect-arm64-failure.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Extract verification failure from completed build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/ciLLienfl99/xo/actions/runs/36152809218/logs > "$RUNNER_TEMP/build-logs.zip"
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          archive = Path(os.environ['RUNNER_TEMP']) / 'build-logs.zip'
+          with zipfile.ZipFile(archive) as z:
+              selected = [n for n in z.namelist() if 'Verify native packages' in n]
+              if not selected:
+                  raise RuntimeError('Verification step log was not found: ' + str(z.namelist()))
+              for name in selected:
+                  print('\n=== ' + name + ' ===\n')
+                  print(z.read(name).decode('utf-8', errors='replace')[-22000:])
+          PY
