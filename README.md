@@ -1,82 +1,60 @@
-# OxideTerm：Mac ARM64 包内便携定制版
+# OxideTerm：Mac ARM64 定制版
 
-面向 Apple Silicon，编译目标 `aarch64-apple-darwin`。这是个人定制构建，不是上游官方发行版。
+面向 Apple Silicon，包含活动会话右键菜单和独立字号设置。这是个人定制构建，不是上游官方发行版。
 
-> **首次打开注意：本自用版未做整包 Developer ID 签名及公证。浏览器下载后，macOS 可能提示应用已损坏，不能把 Actions 编译或初始启动通过当作 Gatekeeper 通过。** 不要因此删除含有 UserData 的旧应用。下面提供仅针对这份已核对程序的本机放行方式。
+## 标准安装版：DMG
 
-## 直接下载应用
+**[下载 OxideTerm-2.0.31-Mac-ARM64-Desktop.dmg](https://github.com/ciLLienfl99/xo/releases/download/v2.0.31-desktop-arm64.2/OxideTerm-2.0.31-Mac-ARM64-Desktop.dmg)**
 
-**[下载 OxideTerm-2.0.31-Mac-ARM64-Bundle.zip](https://github.com/ciLLienfl99/xo/releases/download/v2.0.31-custom-arm64-build.3/OxideTerm-2.0.31-Mac-ARM64-Bundle.zip)**
+打开 DMG，把 **OxideTerm Desktop.app** 拖到 **Applications**。不需要编译、不需要运行 `.command` 修复脚本。
 
-解压后就是单个 `OxideTerm.app`，不需要编译源码。
+**重要：此版本已修复整包签名结构，但只有完整 ad-hoc 本地签名，没有 Apple Developer ID 公证。Gatekeeper 测试仍为 rejected，不能把它称为免手动放行版。** 首次打开可能仍需要在 **系统设置 → 隐私与安全性 → 仍要打开** 中授权；仅在确认信任此定制版后使用。不要关闭全局 Gatekeeper。
 
-[GitHub 最新发布页](https://github.com/ciLLienfl99/xo/releases/latest)提供应用、完整对应源码、中文使用与升级说明、SHA256 校验值和构建来源记录。完整对应源码是 `OxideTerm-2.0.31-custom-source.tar.gz`，包含上游许可证和第三方说明；GitHub 自动生成的 `Source code (zip)` 只是本仓库构建配置，不代替完整对应源码。
+[完整 Release：应用、源码、校验值和验证报告](https://github.com/ciLLienfl99/xo/releases/tag/v2.0.31-desktop-arm64.2) · [成功的 Actions 打包与发布记录](https://github.com/ciLLienfl99/xo/actions/runs/36182253048)
 
-当前发布版本为 `v2.0.31-custom-arm64-build.3`，使用修复后的代码 `a9475f209049a920ae58b0771472e514a5c2e91c`。应用 ZIP 的 SHA256：
+DMG SHA256：
 
 ```text
-c9cd86b2d04a83638b30685cf373e34af6b0140123839d37483fdda9c333360c
+16174249abfa4e7a0acefff5e90a927a389e3302acabda0fe6bd41cfe77c3b05
 ```
 
-## macOS 提示 damaged / 已损坏时
+### 这次实际验证了什么
 
-此版本的内部 Mach-O 程序有临时签名，但外层可写应用不是已公证发行包。浏览器下载的隔离标记会触发首次打开安全检查。仅当你明确愿意使用本仓库的未公证自用构建时，才选择单应用放行；这不是 Apple 安全认证，也不是扫描无恶意软件的保证。
+完整 `.app` 的 `codesign --verify --deep --strict` 通过；安装副本进入欢迎界面；初始启动后签名仍通过，包内文件哈希未改变；DMG 完整性、只读挂载和内部应用一致性通过；发布附件与公开下载的 SHA256 一致。
 
-先检查 **系统设置 → 隐私与安全性** 是否为 OxideTerm 显示“仍要打开”。没有该选项时，可使用下列专用工具。无需覆盖或重新安装应用。
+`VERIFICATION.json` 分别记录签名完整性、初始启动和 Gatekeeper 结果。**没有 Apple 签名凭证时，只发布未公证预发布版，不伪报安全认证通过。** 尚未验证真实 SSH/SFTP 会话和旧数据迁移。
 
-下载 [OxideTerm-First-Launch.command](https://github.com/ciLLienfl99/xo/raw/refs/heads/main/support/OxideTerm-First-Launch.command)，放到 Downloads 文件夹。在系统“终端”中执行：
+### 数据位置与旧版不同
 
-```bash
-/bin/bash "$HOME/Downloads/OxideTerm-First-Launch.command" --allow-local-use
-```
+标准安装版使用原程序的 `~/.oxideterm` 隐藏目录，或已有的自定义数据目录。它不再向签名后的 `.app` 写入用户数据，也不在应用旁边要求创建 portable 标记或 data 文件夹。替换安装版应用文件本身不会覆盖这些外部数据。
 
-弹出选择窗口后，选择提示损坏的 **OxideTerm.app**，不要选择 ZIP。工具从上述固定 Release 获取参考 ZIP，验证写死的 SHA256，逐项比对四个程序条目并检查五个内部程序签名；全部匹配后，才移除这个应用及其已校验程序条目的 `com.apple.quarantine` 属性。操作后重新双击应用。
+**旧的 `OxideTerm.app/Contents/UserData` 不会自动迁移。** 新应用名为 `OxideTerm Desktop.app`，避免同名覆盖旧包。保留旧应用和备份，不要把 UserData 手动放进新签名包。
 
-工具不会读取、覆盖或递归处理 `UserData`，不会重新签名、修改程序内容、关闭全局 Gatekeeper 或使用 sudo。只适用于 build.3；程序版本不同、内容被修改、存在程序链接或未完成更新事务时会停止，不会强行放行。校验失败请保留报错，不要删除数据或备份。
+只使用对应的定制安装包更新。未经定制的上游官方更新可能覆盖右键菜单和字号修改。
 
-只检查、不修改时，把参数改为 `--check`。已有原始 ZIP 时，可以额外传入 `--archive "/路径/OxideTerm-2.0.31-Mac-ARM64-Bundle.zip"`，避免再次下载；选择应用也可用 `--app "/路径/OxideTerm.app"` 代替图形选择。
+[标准安装及 Developer ID 公证配置说明](docs/DESKTOP-INSTALLATION.md)
 
-专用 [Verify Mac Local-Use Recovery 工作流](https://github.com/ciLLienfl99/xo/actions/workflows/verify-macos-local-use.yml)在一次性 Mac 副本上检查整包签名拒绝、模拟下载隔离、错误 ZIP/程序变更拦截、用户数据和安全标记保留，以及明确放行后的初始启动。**其成功仅代表本机放行工具的测试通过，不代表 Gatekeeper 接受或应用已经公证。** 原应用 ZIP 和对应源码不变。
+## GitHub Actions 工作流
 
-## 已完成的 GitHub Actions 记录
+- **Package Mac ARM64 Desktop**：将固定的 Actions 编译产物恢复为标准安装布局，完整签名，验证启动、DMG，发布安装包。可手动选择 main 运行；修改对应工作流或打包脚本也会运行。
+- **Build Mac ARM64 Bundle**：保留之前的完整 Rust 编译和旧便携包构建流程。旧便携包的成功不代表 Gatekeeper 通过。
 
-| 阶段 | 已通过的任务 |
-|---|---|
-| Mac ARM64 完整编译、原生测试、打包与校验 | [Mac ARM64 bundle · 3](https://github.com/ciLLienfl99/xo/actions/runs/36162224513) |
-| 独立 Mac 初始启动及包内数据目录检查（未覆盖浏览器下载隔离） | [Check Mac ARM64 Startup](https://github.com/ciLLienfl99/xo/actions/runs/36167841824) |
-| 构建来源、产物哈希复核及 Releases 发布 | [Publish verified Mac ARM64 · 2](https://github.com/ciLLienfl99/xo/actions/runs/36178399464) |
+标准安装版的主程序与辅助程序来自已成功的 [Mac ARM64 bundle · 3](https://github.com/ciLLienfl99/xo/actions/runs/36162224513)，二进制源提交为 `a9475f209049a920ae58b0771472e514a5c2e91c`。此次是对该定制编译产物重新封装和签名，不是换成未修改的官方二进制。
 
-此应用由 GitHub Actions 编译。发布工作流直接使用经过验证的 Actions 原始产物，不重新上传本地编译文件；发布前核对构建输入、包结构、启动报告及全部附件的 SHA256。
+Apple 凭证分支支持 Developer ID 签名、notarytool 提交、stapler 装订和 Gatekeeper 检查；实际证书尚未提供，因此该分支尚未实测。凭证只能放在 GitHub Actions Secrets，不要发到聊天、issue 或代码中。
 
-旧的失败记录仍保留在 Actions 历史中。不要重跑旧的失败任务来获取修复版；需要重新完整编译时，打开 [Build Mac ARM64 Bundle](https://github.com/ciLLienfl99/xo/actions/workflows/mac-arm64.yml)，选择 **Run workflow → main**。
+## 旧包内便携版：仅为已有用户保留
 
-构建配置或 `build/` 中的定制内容推送至 `main` 后，完整编译流程自动运行。后续流程为 **完整构建 → 独立启动检查 → 验证并发布 Releases**；失败的构建或不匹配的启动结果不会发布。Actions 中仍保留原始应用和对应源码产物，保留期 30 天；Releases 提供独立下载入口。
+旧版数据写入 `OxideTerm.app/Contents/UserData`，其外层包不是完整签名发行包，下载后可能出现 damaged/已损坏。**不作为正常双击安装的推荐产物。** 已有用户不要因为报错删除含有数据的旧应用。
 
-## 定制内容
+旧版不能在 Finder 直接整包替换或先删除再安装；需要先备份，再使用兼容的包内升级器保留 UserData。首次打开工具只是显式的单应用本机放行手段，不是签名修复或公证；不适用于新 Desktop 安装版。
 
-- 活动会话操作收进右键菜单，根据连接状态显示连接、SFTP、终端等操作。
-- 设置 → 外观 → 布局：独立调整活动会话字号，默认 14 像素，范围 10–24。
-- 便携运行数据自动保存在 `OxideTerm.app/Contents/UserData`，无需在应用旁边建立 portable 标记或 data 文件夹。
+[旧版完整使用、升级与放行说明（历史快照）](https://github.com/ciLLienfl99/xo/blob/6c7fce9a0f68ae4533b77e649be8915be7ea0602/README.md)
 
-## 首次使用与升级
+## 源码与许可
 
-把整个应用移动到自己有写入权限的位置，再打开。第一次使用设置主密码，之后以主密码解锁包内加密密钥库。旧版本的数据不会被自动迁移或删除；先备份，再通过原有迁移功能导入并核对。
+上游固定为 [AnalyseDeCircuit/oxideterm](https://github.com/AnalyseDeCircuit/oxideterm) 的提交 `4d5933c9914ab5c5efc4ff4124bdf255f6ba619d`，对应上传源码 2.0.31，不随意获取最新 main。
 
-**不能通过 Finder 整包“替换”，也不能先删除含数据的旧应用。** 包内数据会跟随旧应用一起被移走或删除。升级必须使用兼容的定制更新器，或新包内的本地升级脚本：
+完整对应源码为 Release 中的 `OxideTerm-2.0.31-custom-source.tar.gz`；新安装包的重新封装源码另附 `Desktop-Packaging-Source.tar.gz`。GitHub 自动生成的 `Source code (zip)` 仅是本仓库配置快照，不替代完整对应源码。
 
-```bash
-python3 "/新版本目录/OxideTerm.app/Contents/Resources/install_macos_bundle.py" \
-  --target "/原使用目录/OxideTerm.app"
-```
-
-先退出旧应用，把新版本解压在另一个位置，再执行以上命令。脚本仅替换程序条目，不替换 UserData。后续版本仍须包含本仓库定制修改；未修改的官方安装包不能代替此包内便携版本。
-
-这个自用包仅对内部程序做签名校验，外层可写应用未做公证。初始启动检查已通过，但不等于交互式主密码解锁、SSH/SFTP、Gatekeeper 或真实用户数据升级已经验证。首次使用及升级前应保留数据备份。
-
-## 可复现来源
-
-源代码固定为 [AnalyseDeCircuit/oxideterm](https://github.com/AnalyseDeCircuit/oxideterm) 的提交 `4d5933c9914ab5c5efc4ff4124bdf255f6ba619d`，即上传源码包对应版本 2.0.31。不是构建时随意抓取最新 main。
-
-构建流程校验并应用定制补丁，运行打包回归、语言包检查和原生便携/更新器测试，编译主程序及辅助程序，再检查最终应用架构、签名和不包含用户数据的单 .app 布局。完整编译日志保存在每次 Actions 运行中。
-
-上游版权、GPL-3.0-only 许可证及第三方声明保留在对应源码和应用资源中。代码区保存源码补丁和构建配置，Releases 保存编译产物、完整对应源码及说明；不保存连接资料、密码、令牌、私钥或 UserData。
+上游版权、GPL-3.0-only 许可证与第三方声明保留在源码和应用资源中。仓库和 Release 不存储用户的连接资料、密码、私钥或 UserData。
