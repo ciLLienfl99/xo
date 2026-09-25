@@ -26,6 +26,15 @@ def run(args, check=True, timeout=90):
         raise RuntimeError(f'{args[0]} failed ({result.returncode}): {result.stdout[-3000:]} {result.stderr[-3000:]}')
     return result
 
+def set_xattr(path, name, value):
+    run(['/usr/bin/xattr', '-w', name, value.decode('utf-8'), path])
+
+def get_xattr(path, name):
+    return run(['/usr/bin/xattr', '-p', name, path]).stdout.rstrip('\n').encode('utf-8')
+
+def list_xattrs(path):
+    return run(['/usr/bin/xattr', path]).stdout.splitlines()
+
 def require(value, message):
     if not value:
         raise RuntimeError(message)
@@ -69,8 +78,8 @@ try:
     quarantine = f'0083;{int(time.time()):x};OxideTermLocalUseTest;{uuid.uuid4()}'.encode()
     for path in [app] + list(contents.rglob('*')):
         if not path.is_symlink():
-            os.setxattr(path, 'com.apple.quarantine', quarantine)
-    os.setxattr(outside, 'com.apple.quarantine', quarantine)
+            set_xattr(path, 'com.apple.quarantine', quarantine)
+    set_xattr(outside, 'com.apple.quarantine', quarantine)
     info = contents / 'Info.plist'
     info_bytes = info.read_bytes()
     prefix = ['/bin/bash', SCRIPT, '--app', app, '--archive', ARCHIVE]
@@ -79,13 +88,13 @@ try:
     bad_zip.write_bytes(b'not the published archive')
     result = run(['/bin/bash', SCRIPT, '--allow-local-use', '--app', app, '--archive', bad_zip], check=False)
     require(result.returncode != 0, 'Corrupt archive was accepted')
-    require(os.getxattr(app, 'com.apple.quarantine') == quarantine, 'Failed check changed quarantine')
+    require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Failed check changed quarantine')
     report['reject_wrong_archive_without_changes'] = True
     # Actual program modifications must also fail closed.
     info.write_bytes(info_bytes + b'changed')
     result = run(prefix + ['--allow-local-use'], check=False)
     require(result.returncode != 0, 'Modified application was accepted')
-    require(os.getxattr(app, 'com.apple.quarantine') == quarantine, 'Failed content check changed quarantine')
+    require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Failed content check changed quarantine')
     info.write_bytes(info_bytes)
     report['reject_modified_program_without_changes'] = True
     # No links or hard links are permitted within managed program entries.
@@ -98,7 +107,7 @@ try:
     report['reject_program_hardlinks'] = True
     result = run(prefix + ['--check'])
     (OUT / 'read-only-check.txt').write_text(result.stdout + result.stderr)
-    require(os.getxattr(app, 'com.apple.quarantine') == quarantine, 'Read-only check changed quarantine')
+    require(get_xattr(app, 'com.apple.quarantine') == quarantine, 'Read-only check changed quarantine')
     report['read_only_check_preserves_quarantine'] = True
     # Show the distinction previously missed by the startup-only test.
     signed = run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '--verbose=2', app], check=False)
@@ -112,17 +121,17 @@ try:
     # Only an explicit opt-in changes metadata, after all file checks pass.
     result = run(prefix + ['--allow-local-use'])
     (OUT / 'local-use-override.txt').write_text(result.stdout + result.stderr)
-    require('com.apple.quarantine' not in os.listxattr(app), 'App root remains quarantined')
+    require('com.apple.quarantine' not in list_xattrs(app), 'App root remains quarantined')
     with zipfile.ZipFile(ARCHIVE) as archive:
         for entry in archive.infolist():
             target = stage / entry.filename
-            require('com.apple.quarantine' not in os.listxattr(target), 'Program quarantine remains')
+            require('com.apple.quarantine' not in list_xattrs(target), 'Program quarantine remains')
             if not entry.is_dir():
                 require(filehash(target) == hashlib.sha256(archive.read(entry)).hexdigest(), 'Program bytes changed')
     require(filehash(sentinel) == sentinel_digest, 'UserData changed')
-    require(os.getxattr(sentinel, 'com.apple.quarantine') == quarantine, 'UserData quarantine was removed')
-    require(os.getxattr(outside, 'com.apple.quarantine') == quarantine, 'External file quarantine was removed')
-    require(os.getxattr(data, 'com.apple.quarantine') == quarantine, 'UserData directory metadata changed')
+    require(get_xattr(sentinel, 'com.apple.quarantine') == quarantine, 'UserData quarantine was removed')
+    require(get_xattr(outside, 'com.apple.quarantine') == quarantine, 'External file quarantine was removed')
+    require(get_xattr(data, 'com.apple.quarantine') == quarantine, 'UserData directory metadata changed')
     run(prefix + ['--allow-local-use'])
     policy_after = run(['/usr/sbin/spctl', '--status'], check=False)
     require((policy_after.returncode, policy_after.stdout, policy_after.stderr) == policy_state, 'Global policy changed')
@@ -147,6 +156,10 @@ try:
     report['local_startup_observation_seconds'] = 20
     report['local_startup'] = 'passed'
     report['status'] = 'passed'
+except Exception as error:
+    report['status'] = 'failed'
+    report['error'] = str(error)
+    raise
 finally:
     (OUT / 'local-use-check.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
