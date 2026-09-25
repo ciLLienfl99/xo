@@ -2,6 +2,8 @@
 
 面向 Apple Silicon，编译目标 `aarch64-apple-darwin`。这是个人定制构建，不是上游官方发行版。
 
+> **首次打开注意：本自用版未做整包 Developer ID 签名及公证。浏览器下载后，macOS 可能提示应用已损坏，不能把 Actions 编译或初始启动通过当作 Gatekeeper 通过。** 不要因此删除含有 UserData 的旧应用。下面提供仅针对这份已核对程序的本机放行方式。
+
 ## 直接下载应用
 
 **[下载 OxideTerm-2.0.31-Mac-ARM64-Bundle.zip](https://github.com/ciLLienfl99/xo/releases/download/v2.0.31-custom-arm64-build.3/OxideTerm-2.0.31-Mac-ARM64-Bundle.zip)**
@@ -16,12 +18,32 @@
 c9cd86b2d04a83638b30685cf373e34af6b0140123839d37483fdda9c333360c
 ```
 
+## macOS 提示 damaged / 已损坏时
+
+此版本的内部 Mach-O 程序有临时签名，但外层可写应用不是已公证发行包。浏览器下载的隔离标记会触发首次打开安全检查。仅当你明确愿意使用本仓库的未公证自用构建时，才选择单应用放行；这不是 Apple 安全认证，也不是扫描无恶意软件的保证。
+
+先检查 **系统设置 → 隐私与安全性** 是否为 OxideTerm 显示“仍要打开”。没有该选项时，可使用下列专用工具。无需覆盖或重新安装应用。
+
+下载 [OxideTerm-First-Launch.command](https://github.com/ciLLienfl99/xo/raw/refs/heads/main/support/OxideTerm-First-Launch.command)，放到 Downloads 文件夹。在系统“终端”中执行：
+
+```bash
+/bin/bash "$HOME/Downloads/OxideTerm-First-Launch.command" --allow-local-use
+```
+
+弹出选择窗口后，选择提示损坏的 **OxideTerm.app**，不要选择 ZIP。工具从上述固定 Release 获取参考 ZIP，验证写死的 SHA256，逐项比对四个程序条目并检查五个内部程序签名；全部匹配后，才移除这个应用及其已校验程序条目的 `com.apple.quarantine` 属性。操作后重新双击应用。
+
+工具不会读取、覆盖或递归处理 `UserData`，不会重新签名、修改程序内容、关闭全局 Gatekeeper 或使用 sudo。只适用于 build.3；程序版本不同、内容被修改、存在程序链接或未完成更新事务时会停止，不会强行放行。校验失败请保留报错，不要删除数据或备份。
+
+只检查、不修改时，把参数改为 `--check`。已有原始 ZIP 时，可以额外传入 `--archive "/路径/OxideTerm-2.0.31-Mac-ARM64-Bundle.zip"`，避免再次下载；选择应用也可用 `--app "/路径/OxideTerm.app"` 代替图形选择。
+
+专用 [Verify Mac Local-Use Recovery 工作流](https://github.com/ciLLienfl99/xo/actions/workflows/verify-macos-local-use.yml)在一次性 Mac 副本上检查整包签名拒绝、模拟下载隔离、错误 ZIP/程序变更拦截、用户数据和安全标记保留，以及明确放行后的初始启动。**其成功仅代表本机放行工具的测试通过，不代表 Gatekeeper 接受或应用已经公证。** 原应用 ZIP 和对应源码不变。
+
 ## 已完成的 GitHub Actions 记录
 
 | 阶段 | 已通过的任务 |
 |---|---|
 | Mac ARM64 完整编译、原生测试、打包与校验 | [Mac ARM64 bundle · 3](https://github.com/ciLLienfl99/xo/actions/runs/36162224513) |
-| 独立 Mac 初始启动及包内数据目录检查 | [Check Mac ARM64 Startup](https://github.com/ciLLienfl99/xo/actions/runs/36167841824) |
+| 独立 Mac 初始启动及包内数据目录检查（未覆盖浏览器下载隔离） | [Check Mac ARM64 Startup](https://github.com/ciLLienfl99/xo/actions/runs/36167841824) |
 | 构建来源、产物哈希复核及 Releases 发布 | [Publish verified Mac ARM64 · 2](https://github.com/ciLLienfl99/xo/actions/runs/36178399464) |
 
 此应用由 GitHub Actions 编译。发布工作流直接使用经过验证的 Actions 原始产物，不重新上传本地编译文件；发布前核对构建输入、包结构、启动报告及全部附件的 SHA256。
