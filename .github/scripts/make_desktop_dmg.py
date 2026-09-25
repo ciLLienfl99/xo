@@ -140,13 +140,16 @@ def smoke(app, temp):
     install.parent.mkdir()
     run('ditto', app, install)
     before = snapshot(install)
-    executable = str(install / 'Contents/MacOS/oxideterm-native')
+    executable = str((install / 'Contents/MacOS/oxideterm-native').resolve())
+    aliases = {executable}
+    if executable.startswith('/private/var/'):
+        aliases.add(executable[len('/private'):])
     def pids():
-        listing = run('ps', '-axo', 'pid=,command=', quiet=True).stdout
+        listing = run('ps', '-axww', '-o', 'pid=,command=', quiet=True).stdout
         result = set()
         for line in listing.splitlines():
             fields = line.strip().split(None, 1)
-            if len(fields) == 2 and fields[1].startswith(executable):
+            if len(fields) == 2 and any(fields[1] == p or fields[1].startswith(p + ' ') for p in aliases):
                 result.add(int(fields[0]))
         return result
     tracked = set()
@@ -158,6 +161,10 @@ def smoke(app, temp):
             if tracked:
                 break
             time.sleep(1)
+        if not tracked:
+            listing = run('ps', '-axww', '-o', 'pid=,command=', quiet=True).stdout
+            (DIAG / 'startup-processes.txt').write_text('\n'.join(l for l in listing.splitlines() if 'oxideterm' in l.lower()))
+            run('screencapture', '-x', DIAG / 'startup-failure.png', check=False)
         require(tracked, 'LaunchServices did not start the installed application')
         time.sleep(20)
         require(tracked & pids(), 'Application exited during startup')
@@ -190,7 +197,7 @@ def main():
     policy_before = run('spctl', '--status', quiet=True).stdout.strip()
     REPORT['system_policy_before'] = policy_before
     with tempfile.TemporaryDirectory(prefix='oxideterm-desktop-') as tmp:
-        temp = Path(tmp)
+        temp = Path(tmp).resolve()
         try:
             stage = temp / 'stage'; stage.mkdir()
             run('ditto', '-x', '-k', archive, stage)
