@@ -3,6 +3,11 @@ run-name: Mac ARM64 bundle · ${{ github.run_number }}
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mac-arm64.yml'
+      - 'build/**'
 
 permissions:
   contents: read
@@ -83,9 +88,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Upload exact corresponding source
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: OxideTerm-Corresponding-Source
           path: build-source/*.tar.gz
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
