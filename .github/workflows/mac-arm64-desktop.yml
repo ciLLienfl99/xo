@@ -1,0 +1,159 @@
+name: Package Mac ARM64 Desktop
+run-name: Mac ARM64 Desktop installer · ${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mac-arm64-desktop.yml'
+      - '.github/scripts/make_desktop_dmg.py'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mac-arm64-desktop
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Seal, test and package the desktop application
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout packaging source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Download the pinned Actions-compiled application
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: OxideTerm-Mac-ARM64-Bundle
+          path: artifact
+          github-token: ${{ github.token }}
+          run-id: 36162224513
+      - name: Download exact corresponding source and licenses
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: OxideTerm-Corresponding-Source
+          path: source-artifact
+          github-token: ${{ github.token }}
+          run-id: 36162224513
+      - name: Create full bundle signature, test startup and verify DMG
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: python .github/scripts/make_desktop_dmg.py
+      - name: Upload the standard desktop installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Mac-ARM64-Desktop
+          path: desktop-output/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve diagnostics and explicit Gatekeeper result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: OxideTerm-Desktop-Diagnostics
+          path: desktop-diagnostics/*
+          if-no-files-found: warn
+          retention-days: 30
+
+  publish:
+    name: Publish verified desktop installer
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download verified desktop release files
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: OxideTerm-Mac-ARM64-Desktop
+          path: desktop-output
+      - name: Publish complete installer with accurate signing status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          repo = os.environ['GH_REPO']
+          root = Path('desktop-output')
+          report = json.loads((root / 'VERIFICATION.json').read_text())
+          if report['status'] != 'passed' or report['whole_bundle_signature'] != 'passed':
+              raise RuntimeError('Desktop package verification did not pass')
+          if report['packaging_commit'] != os.environ['GITHUB_SHA']:
+              raise RuntimeError('Mismatched packaging source')
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          checks = (root / 'SHA256SUMS.txt').read_text().splitlines()
+          for line in checks:
+              expected, name = line.split('  ', 1)
+              if Path(name).name != name or digest(root / name) != expected:
+                  raise RuntimeError('Release file checksum mismatch: ' + name)
+          certified = report['notarized'] and report['gatekeeper_accepted']
+          tag = 'v2.0.31-desktop-arm64.' + os.environ['GITHUB_RUN_NUMBER']
+          files = sorted(root.iterdir())
+          notes = ('## Mac ARM64 标准安装版\n\n'
+              '下载 **OxideTerm-2.0.31-Mac-ARM64-Desktop.dmg**，打开后把 **OxideTerm Desktop.app** 拖到 Applications。\n\n'
+              '这是已编译的应用，不需要运行终端或首次打开修复脚本。\n\n'
+              '**与旧便携版不同：** 本版不再向 .app 写入用户数据。数据使用原程序的 `~/.oxideterm` 隐藏目录或已有自定义目录；'
+              '保留活动会话右键菜单和独立字号。旧 `OxideTerm.app` 不会被同名覆盖，旧包内数据不会自动迁移。\n\n'
+              '**验证结果：** 完整 .app 签名通过；安装副本启动后签名仍有效且包内容未变化；DMG 校验、挂载和包内容核对通过。\n\n')
+          if certified:
+              notes += '**签名状态：Developer ID 签名、公证及 Gatekeeper 检查均通过。**\n\n'
+          else:
+              notes += ('**签名状态：完整 ad-hoc 本地签名，未公证。Gatekeeper 并未认可此应用。** '
+                        '首次打开可能仍需在系统设置 → 隐私与安全性 → 仍要打开中授权，仅在确认信任此版本后使用。'
+                        '这不是苹果认可的免手动放行发行版；不要关闭全局安全设置。\n\n')
+          notes += ('此安装版由 GitHub Actions 对固定的定制编译产物重新封装和签名。'
+                    '完整二进制来源为 [构建 3](https://github.com/' + repo + '/actions/runs/36162224513)，'
+                    '本次[安装包验证](https://github.com/' + repo + '/actions/runs/' + os.environ['GITHUB_RUN_ID'] + ')另附。\n\n'
+                    '附有完整对应源码和新增打包脚本源码、SHA256 及 VERIFICATION.json。未验证真实 SSH/SFTP 交互和旧数据迁移。')
+          Path('notes.md').write_text(notes)
+          subprocess.run(['gh','release','create',tag,'--repo',repo,'--target',os.environ['GITHUB_SHA'],
+                          '--title','OxideTerm 2.0.31 · Mac ARM64 标准安装版','--notes-file','notes.md',
+                          '--draft'] + [str(p) for p in files],check=True)
+          def api(path, *args):
+              return json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/'+path,*args],text=True))
+          matches = [r for r in api('releases?per_page=100') if r['tag_name'] == tag]
+          if len(matches) != 1:
+              raise RuntimeError('Cannot uniquely resolve created draft')
+          release = matches[0]
+          if release['target_commitish'] != os.environ['GITHUB_SHA'] or not release['draft']:
+              raise RuntimeError('Unexpected draft identity')
+          assets = {a['name']: a for a in release['assets']}
+          if set(assets) != {p.name for p in files}:
+              raise RuntimeError('Incomplete uploaded asset set')
+          for p in files:
+              a = assets[p.name]
+              if a['state'] != 'uploaded' or a['size'] != p.stat().st_size or a['digest'] != 'sha256:'+digest(p):
+                  raise RuntimeError('Uploaded asset validation failed: '+p.name)
+          release = api('releases/'+str(release['id']), '-X','PATCH','-F','draft=false',
+                        '-F','prerelease='+str(not certified).lower(),'-f','make_latest=false')
+          dmg = next(a for a in release['assets'] if a['name'].endswith('.dmg'))
+          public = Path('public-download.dmg')
+          subprocess.run(['curl','--disable','--fail','--location','--silent','--show-error',
+                          '--retry','3','--output',str(public),dmg['browser_download_url']],check=True)
+          if digest(public) != report['dmg_sha256']:
+              raise RuntimeError('Public download checksum mismatch')
+          print('Published and downloaded:',release['html_url'])
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write(notes+'\n\n[下载页面]('+release['html_url']+')\n')
+          PY
